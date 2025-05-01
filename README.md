@@ -28,9 +28,15 @@
 MOSAIC/
 │
 ├── audio/
-│   ├── extract_features.py        # 使用 wav2vec2.0 提取深度特征
+│   ├── extract_features.py        # 需要加上15s分段再合并
 │   ├── train_filter_model.py      # 训练音频特征过滤器
-│   └── match_audio_segments.py    # 匹配语音段，使用DP优化
+|   --- resample.py
+|   --- convert_to_wav.py
+|   --- segmenter.py
+|   --- denoise.py
+|   --- silence_remove.py
+|   --- matching.py                # 返回(Segments, (begin_f, end_f, 速度倍率))
+|   --- audio_main.py  
 │
 ├── video/
 │   ├── extract_frames.py          # 使用 OpenCV 分帧
@@ -51,3 +57,16 @@ MOSAIC/
 
 ```
 
+一些问题：
+
+音素、音节粒度的分词器。语言无关的语音片段边界检测问题
+要把输入音频切成15s的小段再wav2vec
+wav2vec的vec满足正交性？相似性曲线如何
+说话人无关
+改成vec flow，有无更好的速度匹配方法
+中，英，日，粤
+
+需要写个class，ProcessedAudio：
+音频数据audio，每一帧（20ms）对应原始数据的哪一帧frame_index，文件名name，特征向量vec，分词帧segment_frame
+
+这里特征向量需要支持本地读取or在线计算

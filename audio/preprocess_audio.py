@@ -53,7 +53,7 @@ def preprocess_audio_file(input_path: str, output_path: str, target_sr=16000):
         sr = target_sr
 
     # Step 3: Denoise
-    y_denoised = y #denoise_audio(y, sr)
+    y_denoised = denoise_audio(y, sr)
 
     # Step 4: VAD (remove silence)
     y_clean = vad_split(y_denoised, sr)
@@ -69,6 +69,6 @@ def preprocess_audio_file(input_path: str, output_path: str, target_sr=16000):
 
 # Example usage
 if __name__ == "__main__":
-    input_file = "../data/raw_audio/Trump_WEF_2018.mp3"
-    output_file = "../data/processed_clean/Trump_WEF_2018_clean.wav"
+    input_file = "../data/raw_audio/deep.wav"
+    output_file = "../data/processed_clean/deep_clean.wav"
     preprocess_audio_file(input_file, output_file)
