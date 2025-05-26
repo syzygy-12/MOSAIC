@@ -16,6 +16,7 @@ from pathlib import Path
 
 RAW_AUDIO_DIR = "../data/raw_audio"
 PROCESSED_AUDIO_DIR = "../data/processed_audio"
+SCALE = np.arange(0.8, 1.2, 0.1)  # 缩放范围
 
 class ProcessedAudio:
     def __init__(self, name: str, audio: np.ndarray = None, frame_index: list[int] = None):
@@ -26,10 +27,21 @@ class ProcessedAudio:
         """
         self.name = name
         self.audio = audio
+        self.audioSet = None
+        self.len = len(audio) // 320 if audio is not None else 0
         self.frame_index = frame_index
         self.vec = None
+        self.vecSet = None
         self.tokens = None
 
+    def __copy__(self):
+        new_obj = ProcessedAudio(self.name, self.audio.copy() if self.audio is not None else None, self.frame_index.copy() if self.frame_index is not None else None)
+        new_obj.len = self.len
+        new_obj.vec = self.vec.copy() if self.vec is not None else None
+        new_obj.vecSet = self.vecSet.copy() if self.vecSet is not None else None
+        new_obj.tokens = self.tokens.copy() if self.tokens is not None else None
+        return new_obj
+    
     def from_file(self, input_path: str, name: str) -> 'ProcessedAudio':
         """
         从原始媒体文件中创建 ProcessedAudio（自动格式转化+重采样，无需中间文件）
@@ -58,6 +70,7 @@ class ProcessedAudio:
         self.audio = y
         self.name = name
         self.frame_index = frame_index
+        self.len = len(y) // 320
         return self
     
     def load_audio(self, name: str = "") -> 'ProcessedAudio':
@@ -71,6 +84,15 @@ class ProcessedAudio:
             print(f"[INFO] Loading {name} from {input_path}...")
             return self.from_file(input_path, name)
         raise FileNotFoundError(f"[ERROR] 找不到音频文件 {name} 在 {RAW_AUDIO_DIR}")
+    
+    def save_audio(self, output_path: str = "../data/save") -> None:
+        """
+        保存音频到指定路径，文件名self.name
+        """
+        os.makedirs(output_path, exist_ok=True)
+        output_path = os.path.join(output_path, f"{self.name}.wav")
+        sf.write(output_path, self.audio, 16000, format="WAV", subtype="PCM_16")
+        print(f"[INFO] 音频保存到 {output_path}")
 
     def denoise(self) -> 'ProcessedAudio':
         """ 应用噪声抑制 """
@@ -104,20 +126,36 @@ class ProcessedAudio:
         # 归一化响度
         self.audio = librosa.util.normalize(self.audio)
         self.frame_index = new_frame_index
+        self.len = len(self.audio) // 320
         return self
+    
+    def audio_stretch(self, rate: float) -> 'ProcessedAudio':
+        """
+        音频拉伸，rate > 1.0 时音频变慢，rate < 1.0 时音频变快
+        """
+        if rate <= 0:
+            raise ValueError("[ERROR] 拉伸比率必须大于0")
+        audio = librosa.effects.time_stretch(self.audio, rate=rate)
+        return audio
     
     def pre_process(self) -> 'ProcessedAudio':
         """
-        预处理音频：去噪、去静音、重采样
+        预处理音频：去噪、去静音、重采样、变速
         """
         self.denoise()
         self.remove_silence_vad()
         # 保存
-        os.makedirs(PROCESSED_AUDIO_DIR, exist_ok=True)
-        output_path = os.path.join(PROCESSED_AUDIO_DIR, f"{self.name}.wav")
-        sf.write(output_path, self.audio, 16000, format="WAV", subtype="PCM_16")
-        print(f"[INFO] 预处理完成，保存到 {output_path}")
+        self.save_audio(PROCESSED_AUDIO_DIR)
+        # 保存不同缩放比例的音频到audios
+        self.audioSet = []
+        self.vecSet = []
+        for scale in SCALE:
+            audio = self.audio_stretch(scale)
+            self.audioSet.append(audio)
+
         return self
+    
+    
 
     def extract_feature(self, model_name: str = "facebook/wav2vec2-large-xlsr-53") -> 'ProcessedAudio':
         """
@@ -169,6 +207,38 @@ class ProcessedAudio:
 
         return self
     
+    def extract_feature_from_segment(self, start: int, end: int, model_name: str = "facebook/wav2vec2-large-xlsr-53") -> np.ndarray:
+        """
+        提取某个时间段（帧）的 wav2vec2 特征向量（vec flow）
+        start, end: 单位为帧
+        返回: shape = (T, D) 的 np.ndarray
+        """
+
+        sr = 16000
+        start_sample = int(start * 320)
+        end_sample = int(end * 320)
+        segment = self.audio[start_sample:end_sample]
+        if len(segment) < 1000:
+            raise ValueError(f"[ERROR] 提取特征时音频片段长度不足: {len(segment)} samples")
+
+        # 初始化模型和特征提取器（与 extract_feature 保持一致）
+        if not hasattr(self.__class__, "_wav2vec2_extractor"):
+            self.__class__._wav2vec2_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_name)
+            self.__class__._wav2vec2_model = Wav2Vec2Model.from_pretrained(model_name).eval().to("cuda" if torch.cuda.is_available() else "cpu")
+
+        extractor = self.__class__._wav2vec2_extractor
+        model = self.__class__._wav2vec2_model
+
+        # 处理并送入模型
+        inputs = extractor(segment, sampling_rate=sr, return_tensors="pt", padding=True)
+        input_values = inputs.input_values.to(model.device)
+
+        with torch.no_grad():
+            outputs = model(input_values, output_hidden_states=True)
+            hidden_states = outputs.hidden_states[4].squeeze(0).cpu().numpy()  # 选第4层作为特征
+
+        return hidden_states  # shape: (T, D)
+    
     def sec_to_frame(t):  # 20ms 一帧
         return int(round(t * 50))
 
@@ -207,8 +277,8 @@ class ProcessedAudio:
             for word in segment.get("words", []):
                 #print(word)
                 tokens.append({
-                    "start": int(max(0, round(word["start"] * 50))),
-                    "end": int(round(word["end"] * 50)),
+                    "start": int(max(0, round(word["start"] * 50) - 8)),
+                    "end": int(round(word["end"] * 50) - 8),
                     # 这里分词会有一个很明显的尾音，把下一个字的音头剪进来了
                     "text": word["word"].strip()
                 })

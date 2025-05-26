@@ -6,8 +6,8 @@ import os
 import soundfile as sf
 import librosa
 
-DATANAME = "trump"
-TARGETNAME = "never"
+DATANAME = "base"
+TARGETNAME = "deep"
 
 def resample_vector_flow(flow: np.ndarray, target_len: int) -> np.ndarray:
 
@@ -20,7 +20,7 @@ def resample_vector_flow(flow: np.ndarray, target_len: int) -> np.ndarray:
     return f(x_new)
 
 def similarity(a: np.ndarray, b: np.ndarray) -> float:
-    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-6)
+    #return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-6)
     # shape: (T, D)
     a_norm = a / (np.linalg.norm(a, axis=1, keepdims=True) + 1e-6)
     b_norm = b / (np.linalg.norm(b, axis=1, keepdims=True) + 1e-6)
@@ -29,8 +29,8 @@ def similarity(a: np.ndarray, b: np.ndarray) -> float:
 
 def match_token_to_data(
     token_flow: np.ndarray,
-    data_flow: np.ndarray,
-    scale_range=(0.7, 1.3),
+    data_audio: ProcessedAudio,
+    scale_range=(0.8, 1.2),
     step=1.1
 ) -> dict:
     best_score = -1
@@ -42,12 +42,15 @@ def match_token_to_data(
 
     for scale in scales:
         window_len = int(token_len * scale)
-        if window_len > len(data_flow):
+        if window_len > data_audio.len:
+            print(f"Window length {window_len} exceeds data length {data_audio.len}. Skipping scale {scale}.")
             continue
-        for i in range(len(data_flow) - window_len + 1):
-            window = data_flow[i:i + window_len]
-            window_avg = window.mean(axis=0)  # 当前窗口平均向量
-            score = similarity(token_avg, window_avg)  # 直接比较两个平均向量
+        for i in range(data_audio.len - window_len):
+            window = data_audio.extract_feature_from_segment(start=i, end=i + window_len)
+            #window_avg = window.mean(axis=0)  # 当前窗口平均向量
+            window_resampled = resample_vector_flow(window, token_len)  # 重采样到 token_len
+            #score = similarity(token_avg, window_avg)  # 直接比较两个平均向量
+            score = similarity(token_flow, window_resampled)  # 比较 token 平均向量和当前窗口平均向量
             if score > best_score:
                 best_score = score
                 best_info = {
@@ -66,20 +69,20 @@ def match_all_tokens(target_name: str, data_name: str, output_dir: str = "../dat
     target_audio = ProcessedAudio(target_name)
     target_audio.load_audio(target_name)
     target_audio.pre_process()
-    # 只取前30s
-    target_audio.audio = target_audio.audio[:30 * 16000]
+    # 只取前10s
+    target_audio.audio = target_audio.audio[:10 * 16000]
     target_audio.audio = librosa.util.normalize(target_audio.audio)
 
-    target_audio.extract_feature()
+    #target_audio.extract_feature()
     target_audio.tokenize()
 
     data_audio = ProcessedAudio(data_name)
     data_audio.load_audio(data_name)
     data_audio.pre_process()
-    data_audio.extract_feature()
+    #data_audio.extract_feature()
 
-    target_flow = target_audio.feature
-    data_flow = data_audio.feature
+    #target_flow = target_audio.feature
+    #data_flow = data_audio.feature
     tokens = target_audio.tokens
 
     frame_duration = 0.02  # 每帧20ms
@@ -91,9 +94,9 @@ def match_all_tokens(target_name: str, data_name: str, output_dir: str = "../dat
     matched = []
     for idx, token in enumerate(tokens):
         start, end = token["start"], token["end"]
-        token_flow = target_flow[start:end]
+        token_flow = target_audio.extract_feature_from_segment(start=start, end=end)
 
-        match = match_token_to_data(token_flow, data_flow)
+        match = match_token_to_data(token_flow, data_audio)
         match.update({
             "token": token["text"],
             "token_start": start,
