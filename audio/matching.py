@@ -1,74 +1,90 @@
 import numpy as np
-from processed_audio import ProcessedAudio
+import os
+import librosa
+import soundfile as sf
+from tqdm import tqdm
 from typing import Dict
 from scipy.interpolate import interp1d
-import os
-import soundfile as sf
-import librosa
-from tqdm import tqdm 
+from processed_audio import ProcessedAudio
+import torch
 
 DATANAME = "trump"
-TARGETNAME = "qimeidi"
+TARGETNAME = "deep"
 
-def resample_vector_flow(flow: np.ndarray, target_len: int) -> np.ndarray:
-
-    if len(flow) == target_len:
-        return flow
-
-    x_old = np.linspace(0, 1, len(flow))
-    x_new = np.linspace(0, 1, target_len)
-    f = interp1d(x_old, flow, axis=0)
-    return f(x_new)
+SCALE = np.arange(0.8, 1.3, 0.1)  # 缩放范围
 
 def similarity(a: np.ndarray, b: np.ndarray) -> float:
-    #return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-6)
-    # shape: (T, D)
-    a_norm = a / (np.linalg.norm(a, axis=1, keepdims=True) + 1e-6)
-    b_norm = b / (np.linalg.norm(b, axis=1, keepdims=True) + 1e-6)
-    sim = (a_norm * b_norm).sum(axis=1).mean()  # mean cosine similarity
+    """
+    计算两个特征序列的平均余弦相似度，使用GPU加速。
+    """
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    a_torch = torch.from_numpy(a).float().to(device)
+    b_torch = torch.from_numpy(b).float().to(device)
+    a_norm = a_torch / (a_torch.norm(dim=1, keepdim=True) + 1e-6)
+    b_norm = b_torch / (b_torch.norm(dim=1, keepdim=True) + 1e-6)
+    sim = (a_norm * b_norm).sum(dim=1).mean().item()
     return sim
+
 
 def match_token_to_data(
     token_flow: np.ndarray,
     data_feature: np.ndarray,
-    scale_range=(0.8, 1.2),
-    step=1.1
+    batch_size: int = 2048  # 可根据显存调整
 ) -> dict:
-    best_score = -1
-    best_info = {}
-
+    """
+    在 data_feature 中滑窗匹配 token_flow，返回最佳匹配信息。使用GPU分批加速，防止OOM。
+    """
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
     token_len = len(token_flow)
-    scales = np.arange(scale_range[0], scale_range[1] + 1e-4, step - 1)
+    data_len = len(data_feature)
+    if data_len < token_len:
+        return {}
+    windows = np.lib.stride_tricks.sliding_window_view(data_feature, (token_len, data_feature.shape[1]))
+    windows = windows.reshape(-1, token_len, data_feature.shape[1])
+    token = torch.from_numpy(token_flow).float().to(device)  # (T, D)
+    token_norm = token / (token.norm(dim=1, keepdim=True) + 1e-6)  # (T, D)
 
-    for scale in scales:
-        window_len = int(token_len * scale)
-        if window_len > len(data_feature):
-            continue
-        # 批量滑窗
-        for i in range(len(data_feature) - window_len):
-            window = data_feature[i:i + window_len]
-            window_resampled = resample_vector_flow(window, token_len)
-            score = similarity(token_flow, window_resampled)
-            if score > best_score:
-                best_score = score
-                best_info = {
-                    "score": float(score),
-                    "start": int(i),
-                    "end": int(i + window_len),
-                    "scale": float(scale)
-                }
-    return best_info
+    best_score = -float('inf')
+    best_idx = -1
+
+    for i in range(0, len(windows), batch_size):
+        batch = windows[i:i+batch_size]
+        batch_torch = torch.from_numpy(batch).float().to(device)  # (B, T, D)
+        batch_norm = batch_torch / (batch_torch.norm(dim=2, keepdim=True) + 1e-6)  # (B, T, D)
+        sim = (token_norm * batch_norm).sum(dim=2).mean(dim=1)  # (B,)
+        max_sim, max_idx = torch.max(sim, dim=0)
+        if max_sim.item() > best_score:
+            best_score = max_sim.item()
+            best_idx = i + max_idx.item()
+        del batch_torch, batch_norm, sim  # 释放显存
+        torch.cuda.empty_cache()
+
+    if best_idx == -1:
+        return {}
+    return {
+        "score": float(best_score),
+        "start": int(best_idx),
+        "end": int(best_idx + token_len)
+    }
+
 
 def match_all_tokens(target_name: str, data_name: str, output_dir: str = "../data/matched_wavs"):
+    """
+    对 target_name 的每个分词，在 data_name 的不同vecSet倍率中寻找最佳匹配片段，并保存结果。
+    对于每个token，遍历所有scale，取相似度最大的匹配。
+    """
     os.makedirs(output_dir, exist_ok=True)
 
+    # 载入目标音频及特征
     target_audio = ProcessedAudio(target_name)
     target_audio.load_audio(target_name)
     target_audio.pre_process()
-    target_audio.audio = target_audio.audio[:10 * 16000]
+    #target_audio.audio = target_audio.audio[:10 * 16000]
     target_audio.audio = librosa.util.normalize(target_audio.audio)
     target_audio.tokenize()
     target_audio.extract_feature()
+
+    # 载入数据音频及特征
     data_audio = ProcessedAudio(data_name)
     data_audio.load_audio(data_name)
     data_audio.pre_process()
@@ -81,125 +97,51 @@ def match_all_tokens(target_name: str, data_name: str, output_dir: str = "../dat
     final_audio = []
     matched = []
 
-    # 预提取所有帧特征
-    data_feature = data_audio.feature
-
     for idx, token in enumerate(tqdm(tokens, desc="Matching tokens")):
         start, end = token["start"], token["end"]
-        token_flow = target_audio.feature[start:end]
+        token_flow = target_audio.vec[start:end]
         if token_flow.size == 0:
             continue
-        match = match_token_to_data(token_flow, data_feature)
-        if not match:
+        best_match = None
+        best_scale_idx = None
+        best_score = -1
+        # 遍历所有scale，取最大相似度
+        for scale_idx, data_feature in enumerate(data_audio.vecSet):
+            match = match_token_to_data(token_flow, data_feature)
+            if match and match["score"] > best_score:
+                best_score = match["score"]
+                best_match = match
+                best_scale_idx = scale_idx
+        if not best_match:
             continue
-        match.update({
+        scale = SCALE[best_scale_idx]
+        best_match.update({
             "token": token["text"],
             "token_start": start,
-            "token_end": end
+            "token_end": end,
+            "scale": float(scale)
         })
-        matched.append(match)
-        # ...后续保存音频片段的代码不变...
-# def match_token_to_data(
-#     token_flow: np.ndarray,
-#     data_audio: ProcessedAudio,
-#     scale_range=(0.8, 1.2),
-#     step=1.1
-# ) -> dict:
-#     best_score = -1
-#     best_info = {}
+        matched.append(best_match)
 
-#     token_len = len(token_flow)
-#     token_avg = token_flow.mean(axis=0)  # 提前计算 token 的平均向量
-#     scales = np.arange(scale_range[0], scale_range[1] + 1e-4, step - 1)
-
-#     for scale in scales:
-#         window_len = int(token_len * scale)
-#         if window_len > data_audio.len:
-#             print(f"Window length {window_len} exceeds data length {data_audio.len}. Skipping scale {scale}.")
-#             continue
-#         for i in range(data_audio.len - window_len):
-#             window = data_audio.extract_feature_from_segment(start=i, end=i + window_len)
-#             #window_avg = window.mean(axis=0)  # 当前窗口平均向量
-#             window_resampled = resample_vector_flow(window, token_len)  # 重采样到 token_len
-#             #score = similarity(token_avg, window_avg)  # 直接比较两个平均向量
-#             score = similarity(token_flow, window_resampled)  # 比较 token 平均向量和当前窗口平均向量
-#             if score > best_score:
-#                 best_score = score
-#                 best_info = {
-#                     "score": float(score),
-#                     "start": int(i),
-#                     "end": int(i + window_len),
-#                     "scale": float(scale)
-#                 }
-        
-#     print(f"Best match: {best_info}")
-#     return best_info
-
-# def match_all_tokens(target_name: str, data_name: str, output_dir: str = "../data/matched_wavs"):
-#     os.makedirs(output_dir, exist_ok=True)  # 确保输出文件夹存在
-
-#     target_audio = ProcessedAudio(target_name)
-#     target_audio.load_audio(target_name)
-#     target_audio.pre_process()
-#     # 只取前10s
-#     target_audio.audio = target_audio.audio[:10 * 16000]
-#     target_audio.audio = librosa.util.normalize(target_audio.audio)
-
-#     #target_audio.extract_feature()
-#     target_audio.tokenize()
-
-#     data_audio = ProcessedAudio(data_name)
-#     data_audio.load_audio(data_name)
-#     data_audio.pre_process()
-#     #data_audio.extract_feature()
-
-#     #target_flow = target_audio.feature
-#     #data_flow = data_audio.feature
-#     tokens = target_audio.tokens
-
-#     frame_duration = 0.02  # 每帧20ms
-#     sampling_rate = 16000  # 与预处理保持一致
-#     frame_size = int(sampling_rate * frame_duration)  # 每帧对应的采样点数：320
-
-#     final_audio = []
-
-#     matched = []
-#     for idx, token in enumerate(tqdm(tokens, desc="Matching tokens")):
-#         start, end = token["start"], token["end"]
-#         token_flow = target_audio.extract_feature_from_segment(start=start, end=end)
-
-#         match = match_token_to_data(token_flow, data_audio)
-#         match.update({
-#             "token": token["text"],
-#             "token_start": start,
-#             "token_end": end
-#         })
-#         matched.append(match)
-
-        # ========== 保存匹配出来的 data 音频片段 ==========
-        data_start_sample = match["start"] * frame_size
-        data_end_sample = match["end"] * frame_size
-        audio_snippet = data_audio.audio[data_start_sample : data_end_sample]
-        # 按照scale缩放音频片段
-        scale = match["scale"]
-        audio_snippet = librosa.resample(audio_snippet, orig_sr=sampling_rate, target_sr=int(sampling_rate / scale))
-        # 把audio_snippet插入到 final_audio 中
+        # 保存匹配出来的 data 音频片段
+        data_start_sample = best_match["start"] * frame_size
+        data_end_sample = best_match["end"] * frame_size
+        audio_snippet = data_audio.audioSet[best_scale_idx][data_start_sample: data_end_sample]
         final_audio.append(audio_snippet)
 
-        # 构建保存路径（如：hello_05_013_1.1.wav）
+        # 保存路径
         token_label = token["text"]
-        scale = match["scale"]
         save_path = os.path.join(
             output_dir,
-            f"{token_label}_{idx:03d}_{match['start']:04d}_{match['end']:04d}_x{scale:.2f}.wav"
+            f"{token_label}_{idx:03d}_{best_match['start']:04d}_{best_match['end']:04d}_x{scale:.2f}.wav"
         )
-
         sf.write(save_path, audio_snippet, samplerate=sampling_rate)
         print(f"[SAVED] Token '{token_label}' matched to {save_path}")
-        # target音频片段保存
+
+        # 保存 target 音频片段
         target_start_sample = start * frame_size
         target_end_sample = end * frame_size
-        target_snippet = target_audio.audio[target_start_sample : target_end_sample]
+        target_snippet = target_audio.audio[target_start_sample: target_end_sample]
         target_save_path = os.path.join(
             output_dir,
             f"{token_label}_target_{idx:03d}_{start:04d}_{end:04d}.wav"
@@ -207,13 +149,15 @@ def match_all_tokens(target_name: str, data_name: str, output_dir: str = "../dat
         sf.write(target_save_path, target_snippet, samplerate=sampling_rate)
         print(f"[SAVED] Token '{token_label}' target to {target_save_path}")
 
-    # ========== 合并最终的音频片段并保存 ==========
-    final_audio = np.concatenate(final_audio, axis=0)  # 合并所有音频片段
-    final_save_path = os.path.join(output_dir, f"_final_{target_name}_{data_name}.wav")
-    sf.write(final_save_path, final_audio, samplerate=sampling_rate)
-    print(f"[SAVED] Final audio saved to {final_save_path}")
+    # 合并最终的音频片段并保存
+    if final_audio:
+        final_audio = np.concatenate(final_audio, axis=0)
+        final_save_path = os.path.join(output_dir, f"_final_{target_name}_{data_name}.wav")
+        sf.write(final_save_path, final_audio, samplerate=sampling_rate)
+        print(f"[SAVED] Final audio saved to {final_save_path}")
 
     return matched
+
 
 if __name__ == "__main__":
     result = match_all_tokens(TARGETNAME, DATANAME)

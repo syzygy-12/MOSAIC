@@ -16,7 +16,7 @@ from pathlib import Path
 
 RAW_AUDIO_DIR = "../data/raw_audio"
 PROCESSED_AUDIO_DIR = "../data/processed_audio"
-SCALE = np.arange(0.8, 1.2, 0.1)  # 缩放范围
+SCALE = np.arange(0.8, 1.3, 0.1)  # 缩放范围
 
 class ProcessedAudio:
     def __init__(self, name: str, audio: np.ndarray = None, frame_index: list[int] = None):
@@ -159,52 +159,52 @@ class ProcessedAudio:
 
     def extract_feature(self, model_name: str = "facebook/wav2vec2-large-xlsr-53") -> 'ProcessedAudio':
         """
-        提取 wav2vec2 特征（按15秒分段后拼接），若已有缓存则直接加载
+        提取 wav2vec2 特征（按15秒分段后拼接），对每一个倍率都要保存，直接保存vecSet为一个npy文件
         """
         feature_dir = "../data/feature"
         os.makedirs(feature_dir, exist_ok=True)
-        feature_path = os.path.join(feature_dir, f"{self.name}.npy")
-
-        if os.path.exists(feature_path):
-            print(f"[INFO] Feature already exists for {self.name}, loading from {feature_path}")
-            self.feature = np.load(feature_path)
+        vecset_path = os.path.join(feature_dir, f"{self.name}_vecset.npy")
+        self.vecSet = []
+        if os.path.exists(vecset_path):
+            print(f"[INFO] VecSet already exists for {self.name}, loading from {vecset_path}")
+            self.vecSet = np.load(vecset_path, allow_pickle=True).tolist()
+            # 兼容单独保存vec
+            for idx, scale in enumerate(SCALE):
+                if scale == 1.0:
+                    self.vec = self.vecSet[idx]
             return self
-
-        print(f"[INFO] Extracting features with {model_name} for {self.name}...")
-
+        if not hasattr(self, 'audioSet') or self.audioSet is None:
+            raise ValueError("[ERROR] audioSet 为空，请先调用 pre_process 或 save_scaled_audios 生成 audioSet")
         # 初始化模型和处理器（静态缓存防止重复加载）
         if not hasattr(self.__class__, "_wav2vec2_extractor"):
             self.__class__._wav2vec2_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_name)
             self.__class__._wav2vec2_model = Wav2Vec2Model.from_pretrained(model_name).eval().to("cuda" if torch.cuda.is_available() else "cpu")
-
         extractor = self.__class__._wav2vec2_extractor
         model = self.__class__._wav2vec2_model
-
-        # 分段：15s -> 240000 samples
         sr = 16000
         segment_len = sr * 15
-        features = []
-
-        for i in range(0, len(self.audio), segment_len):
-            segment = self.audio[i:i + segment_len + 320]  # 额外加一帧（20ms = 320采样点）
-            if len(segment) < 1000:
-                continue
-
-            inputs = extractor(segment, sampling_rate=sr, return_tensors="pt", padding=True)
-            input_values = inputs.input_values.to(model.device)
-
-            with torch.no_grad():
-                outputs = model(input_values, output_hidden_states=True)
-                hidden_states = outputs.hidden_states[4].squeeze(0).cpu().numpy()
-                features.append(hidden_states)
-
-        if not features:
-            raise ValueError(f"[ERROR] No valid audio segments found for {self.name}")
-
-        self.feature = np.concatenate(features, axis=0)
-        np.save(feature_path, self.feature)
-        print(f"[OK] Feature saved to {feature_path} with shape {self.feature.shape}")
-
+        for idx, audio in enumerate(self.audioSet):
+            scale = SCALE[idx]
+            print(f"[INFO] Extracting features with {model_name} for {self.name} x{scale:.2f} ...")
+            features = []
+            for i in range(0, len(audio), segment_len):
+                segment = audio[i:i + segment_len + 320]
+                if len(segment) < 1000:
+                    continue
+                inputs = extractor(segment, sampling_rate=sr, return_tensors="pt", padding=True)
+                input_values = inputs.input_values.to(model.device)
+                with torch.no_grad():
+                    outputs = model(input_values, output_hidden_states=True)
+                    hidden_states = outputs.hidden_states[4].squeeze(0).cpu().numpy()
+                    features.append(hidden_states)
+            if not features:
+                raise ValueError(f"[ERROR] No valid audio segments found for {self.name} x{scale:.2f}")
+            feature = np.concatenate(features, axis=0)
+            self.vecSet.append(feature)
+            if scale == 1.0:
+                self.vec = feature
+        np.save(vecset_path, np.array(self.vecSet, dtype=object))
+        print(f"[OK] VecSet saved to {vecset_path} (len={len(self.vecSet)})")
         return self
     
     def extract_feature_from_segment(self, start: int, end: int, model_name: str = "facebook/wav2vec2-large-xlsr-53") -> np.ndarray:
@@ -212,6 +212,7 @@ class ProcessedAudio:
         提取某个时间段（帧）的 wav2vec2 特征向量（vec flow）
         start, end: 单位为帧
         返回: shape = (T, D) 的 np.ndarray
+        !!!!!这个目前有问题，不要用
         """
 
         sr = 16000
@@ -303,4 +304,4 @@ class ProcessedAudio:
         return self
 
 
-        
+
