@@ -1,2 +1,4 @@
 data/feature/
 data/matched_wavs/
+audio/_pycache/
+experiment/_pycache/
