@@ -9,9 +9,9 @@ from processed_audio import ProcessedAudio
 import torch
 
 DATANAME = "trump"
-TARGETNAME = "deep"
+TARGETNAME = "qimeidi"
 
-SCALE = np.arange(0.8, 1.3, 0.1)  # 缩放范围
+SCALE = np.arange(0.5, 1.5, 0.1)  # 缩放范围
 
 def similarity(a: np.ndarray, b: np.ndarray) -> float:
     """
@@ -41,7 +41,7 @@ def match_token_to_data(
         return {}
     windows = np.lib.stride_tricks.sliding_window_view(data_feature, (token_len, data_feature.shape[1]))
     windows = windows.reshape(-1, token_len, data_feature.shape[1])
-    token = torch.from_numpy(token_flow).float().to(device)  # (T, D)
+    token = torch.from_numpy(np.array(token_flow, copy=True)).float().to(device)  # (T, D)
     token_norm = token / (token.norm(dim=1, keepdim=True) + 1e-6)  # (T, D)
 
     best_score = -float('inf')
@@ -49,7 +49,7 @@ def match_token_to_data(
 
     for i in range(0, len(windows), batch_size):
         batch = windows[i:i+batch_size]
-        batch_torch = torch.from_numpy(batch).float().to(device)  # (B, T, D)
+        batch_torch = torch.from_numpy(np.array(batch, copy=True)).float().to(device)  # (B, T, D)
         batch_norm = batch_torch / (batch_torch.norm(dim=2, keepdim=True) + 1e-6)  # (B, T, D)
         sim = (token_norm * batch_norm).sum(dim=2).mean(dim=1)  # (B,)
         max_sim, max_idx = torch.max(sim, dim=0)
@@ -96,6 +96,7 @@ def match_all_tokens(target_name: str, data_name: str, output_dir: str = "../dat
     frame_size = int(sampling_rate * frame_duration)
     final_audio = []
     matched = []
+    final_target = []
 
     for idx, token in enumerate(tqdm(tokens, desc="Matching tokens")):
         start, end = token["start"], token["end"]
@@ -142,6 +143,7 @@ def match_all_tokens(target_name: str, data_name: str, output_dir: str = "../dat
         target_start_sample = start * frame_size
         target_end_sample = end * frame_size
         target_snippet = target_audio.audio[target_start_sample: target_end_sample]
+        final_target.append(target_snippet)
         target_save_path = os.path.join(
             output_dir,
             f"{token_label}_target_{idx:03d}_{start:04d}_{end:04d}.wav"
@@ -151,12 +153,40 @@ def match_all_tokens(target_name: str, data_name: str, output_dir: str = "../dat
 
     # 合并最终的音频片段并保存
     if final_audio:
-        final_audio = np.concatenate(final_audio, axis=0)
+        final_audio = crossfade_concat(final_audio, crossfade_ms=20, sr=sampling_rate)
         final_save_path = os.path.join(output_dir, f"_final_{target_name}_{data_name}.wav")
         sf.write(final_save_path, final_audio, samplerate=sampling_rate)
         print(f"[SAVED] Final audio saved to {final_save_path}")
+    if final_target:
+        final_target = crossfade_concat(final_target, crossfade_ms=20, sr=sampling_rate)
+        final_target_save_path = os.path.join(output_dir, f"_final_target_{target_name}.wav")
+        sf.write(final_target_save_path, final_target, samplerate=sampling_rate)
+        print(f"[SAVED] Final target audio saved to {final_target_save_path}")
 
     return matched
+
+
+def crossfade_concat(snippets, crossfade_ms=20, sr=16000):
+    """
+    Concatenate audio snippets with crossfade to smooth transitions.
+    crossfade_ms: crossfade duration in milliseconds.
+    """
+    if not snippets:
+        return np.array([])
+    crossfade_samples = int(sr * crossfade_ms / 1000)
+    output = snippets[0]
+    for snippet in snippets[1:]:
+        if crossfade_samples > 0 and len(output) >= crossfade_samples and len(snippet) >= crossfade_samples:
+            fade_out = np.linspace(1, 0, crossfade_samples)
+            fade_in = np.linspace(0, 1, crossfade_samples)
+            output[-crossfade_samples:] = (
+                output[-crossfade_samples:] * fade_out +
+                snippet[:crossfade_samples] * fade_in
+            )
+            output = np.concatenate([output, snippet[crossfade_samples:]])
+        else:
+            output = np.concatenate([output, snippet])
+    return output
 
 
 if __name__ == "__main__":

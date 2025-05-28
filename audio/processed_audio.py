@@ -9,14 +9,20 @@ import noisereduce as nr
 import webrtcvad
 import torch
 import torchaudio
-from transformers import Wav2Vec2Processor, Wav2Vec2Model, Wav2Vec2FeatureExtractor
+from transformers import Wav2Vec2Processor, Wav2Vec2Model, Wav2Vec2FeatureExtractor, HubertModel
 import whisper
 import json
 from pathlib import Path
+import torch.nn as nn
 
 RAW_AUDIO_DIR = "../data/raw_audio"
 PROCESSED_AUDIO_DIR = "../data/processed_audio"
 SCALE = np.arange(0.8, 1.3, 0.1)  # 缩放范围
+
+class HubertModelWithFinalProj(HubertModel):
+    def __init__(self, config):
+        super().__init__(config)
+        self.final_proj = nn.Linear(config.hidden_size, config.classifier_proj_size)
 
 class ProcessedAudio:
     def __init__(self, name: str, audio: np.ndarray = None, frame_index: list[int] = None):
@@ -157,9 +163,9 @@ class ProcessedAudio:
     
     
 
-    def extract_feature(self, model_name: str = "facebook/wav2vec2-large-xlsr-53") -> 'ProcessedAudio':
+    def extract_feature(self, model_name: str = "lengyue233/content-vec-best") -> 'ProcessedAudio':
         """
-        提取 wav2vec2 特征（按15秒分段后拼接），对每一个倍率都要保存，直接保存vecSet为一个npy文件
+        提取 contentvec 特征（按15秒分段后拼接），对每一个倍率都要保存，直接保存vecSet为一个npy文件
         """
         feature_dir = "../data/feature"
         os.makedirs(feature_dir, exist_ok=True)
@@ -176,11 +182,9 @@ class ProcessedAudio:
         if not hasattr(self, 'audioSet') or self.audioSet is None:
             raise ValueError("[ERROR] audioSet 为空，请先调用 pre_process 或 save_scaled_audios 生成 audioSet")
         # 初始化模型和处理器（静态缓存防止重复加载）
-        if not hasattr(self.__class__, "_wav2vec2_extractor"):
-            self.__class__._wav2vec2_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_name)
-            self.__class__._wav2vec2_model = Wav2Vec2Model.from_pretrained(model_name).eval().to("cuda" if torch.cuda.is_available() else "cpu")
-        extractor = self.__class__._wav2vec2_extractor
-        model = self.__class__._wav2vec2_model
+        if not hasattr(self.__class__, "_contentvec_model"):
+            self.__class__._contentvec_model = HubertModelWithFinalProj.from_pretrained(model_name).eval().to("cuda" if torch.cuda.is_available() else "cpu")
+        model = self.__class__._contentvec_model
         sr = 16000
         segment_len = sr * 15
         for idx, audio in enumerate(self.audioSet):
@@ -191,11 +195,12 @@ class ProcessedAudio:
                 segment = audio[i:i + segment_len + 320]
                 if len(segment) < 1000:
                     continue
-                inputs = extractor(segment, sampling_rate=sr, return_tensors="pt", padding=True)
-                input_values = inputs.input_values.to(model.device)
+                # 转为 torch tensor, shape (1, L)
+                segment_tensor = torch.tensor(segment, dtype=torch.float32).unsqueeze(0).to(model.device)
                 with torch.no_grad():
-                    outputs = model(input_values, output_hidden_states=True)
-                    hidden_states = outputs.hidden_states[4].squeeze(0).cpu().numpy()
+                    outputs = model(segment_tensor)
+                    # contentvec特征通常用最后一层
+                    hidden_states = outputs["last_hidden_state"].squeeze(0).cpu().numpy()
                     features.append(hidden_states)
             if not features:
                 raise ValueError(f"[ERROR] No valid audio segments found for {self.name} x{scale:.2f}")
@@ -206,10 +211,10 @@ class ProcessedAudio:
         np.save(vecset_path, np.array(self.vecSet, dtype=object))
         print(f"[OK] VecSet saved to {vecset_path} (len={len(self.vecSet)})")
         return self
-    
-    def extract_feature_from_segment(self, start: int, end: int, model_name: str = "facebook/wav2vec2-large-xlsr-53") -> np.ndarray:
+
+    def extract_feature_from_segment(self, start: int, end: int, model_name: str = "lengyue233/content-vec-best") -> np.ndarray:
         """
-        提取某个时间段（帧）的 wav2vec2 特征向量（vec flow）
+        提取某个时间段（帧）的 contentvec 特征向量（vec flow）
         start, end: 单位为帧
         返回: shape = (T, D) 的 np.ndarray
         !!!!!这个目前有问题，不要用
@@ -222,21 +227,16 @@ class ProcessedAudio:
         if len(segment) < 1000:
             raise ValueError(f"[ERROR] 提取特征时音频片段长度不足: {len(segment)} samples")
 
-        # 初始化模型和特征提取器（与 extract_feature 保持一致）
-        if not hasattr(self.__class__, "_wav2vec2_extractor"):
-            self.__class__._wav2vec2_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_name)
-            self.__class__._wav2vec2_model = Wav2Vec2Model.from_pretrained(model_name).eval().to("cuda" if torch.cuda.is_available() else "cpu")
+        # 初始化模型（与 extract_feature 保持一致）
+        if not hasattr(self.__class__, "_contentvec_model"):
+            self.__class__._contentvec_model = HubertModelWithFinalProj.from_pretrained(model_name).eval().to("cuda" if torch.cuda.is_available() else "cpu")
 
-        extractor = self.__class__._wav2vec2_extractor
-        model = self.__class__._wav2vec2_model
+        model = self.__class__._contentvec_model
 
-        # 处理并送入模型
-        inputs = extractor(segment, sampling_rate=sr, return_tensors="pt", padding=True)
-        input_values = inputs.input_values.to(model.device)
-
+        segment_tensor = torch.tensor(segment, dtype=torch.float32).unsqueeze(0).to(model.device)
         with torch.no_grad():
-            outputs = model(input_values, output_hidden_states=True)
-            hidden_states = outputs.hidden_states[4].squeeze(0).cpu().numpy()  # 选第4层作为特征
+            outputs = model(segment_tensor)
+            hidden_states = outputs["last_hidden_state"].squeeze(0).cpu().numpy()
 
         return hidden_states  # shape: (T, D)
     
