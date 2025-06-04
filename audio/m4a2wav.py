@@ -17,6 +17,6 @@ def m4a_to_wav_ffmpeg(input_m4a, output_wav, sample_rate=16000, channels=1):
 
 # 示例用法
 if __name__ == "__main__":
-    input_m4a = "../data/raw_audio/deep.m4a"
-    output_wav = "../data/raw_audio/deep.wav"
+    input_m4a = "../data/raw_audio/base.m4a"
+    output_wav = "../data/raw_audio/base.wav"
     m4a_to_wav_ffmpeg(input_m4a, output_wav)

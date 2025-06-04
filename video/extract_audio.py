@@ -30,6 +30,6 @@ def extract_audio(video_path: str, output_wav_path: str, target_sr: int = 16000)
 
 # Example usage
 if __name__ == "__main__":
-    video_path = "../data/raw_video/qimeidi.mp4"
-    output_audio_path = "../data/raw_audio/qimeidi.wav"
+    video_path = "../data/raw_video/trump2.mp4"
+    output_audio_path = "../data/raw_audio/trump2.wav"
     extract_audio(video_path, output_audio_path)

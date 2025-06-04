@@ -17,7 +17,7 @@ import torch.nn as nn
 
 RAW_AUDIO_DIR = "../data/raw_audio"
 PROCESSED_AUDIO_DIR = "../data/processed_audio"
-SCALE = np.arange(0.8, 1.3, 0.1)  # 缩放范围
+SCALE = np.arange(0.5, 1.01, 0.1)  # 缩放范围
 
 class HubertModelWithFinalProj(HubertModel):
     def __init__(self, config):
@@ -137,7 +137,7 @@ class ProcessedAudio:
     
     def audio_stretch(self, rate: float) -> 'ProcessedAudio':
         """
-        音频拉伸，rate > 1.0 时音频变慢，rate < 1.0 时音频变快
+        音频拉伸，rate < 1.0 时音频变慢，rate > 1.0 时音频变快
         """
         if rate <= 0:
             raise ValueError("[ERROR] 拉伸比率必须大于0")
@@ -176,7 +176,7 @@ class ProcessedAudio:
             self.vecSet = np.load(vecset_path, allow_pickle=True).tolist()
             # 兼容单独保存vec
             for idx, scale in enumerate(SCALE):
-                if scale == 1.0:
+                if np.abs(scale - 1.0) < 1e-6:
                     self.vec = self.vecSet[idx]
             return self
         if not hasattr(self, 'audioSet') or self.audioSet is None:
@@ -198,15 +198,17 @@ class ProcessedAudio:
                 # 转为 torch tensor, shape (1, L)
                 segment_tensor = torch.tensor(segment, dtype=torch.float32).unsqueeze(0).to(model.device)
                 with torch.no_grad():
-                    outputs = model(segment_tensor)
-                    # contentvec特征通常用最后一层
-                    hidden_states = outputs["last_hidden_state"].squeeze(0).cpu().numpy()
+                    outputs = model(segment_tensor, output_hidden_states=True)
+                    # contentvec特征通常用中间层，实验得第六层最好
+                    #hidden_states = outputs["last_hidden_state"].squeeze(0).cpu().numpy()
+                    hidden_states = outputs.hidden_states[6].squeeze(0).cpu().numpy()
                     features.append(hidden_states)
             if not features:
                 raise ValueError(f"[ERROR] No valid audio segments found for {self.name} x{scale:.2f}")
             feature = np.concatenate(features, axis=0)
             self.vecSet.append(feature)
-            if scale == 1.0:
+            print(scale)
+            if np.abs(scale - 1.0) < 1e-6:
                 self.vec = feature
         np.save(vecset_path, np.array(self.vecSet, dtype=object))
         print(f"[OK] VecSet saved to {vecset_path} (len={len(self.vecSet)})")

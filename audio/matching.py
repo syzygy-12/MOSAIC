@@ -7,11 +7,12 @@ from typing import Dict
 from scipy.interpolate import interp1d
 from processed_audio import ProcessedAudio
 import torch
+from processed_audio import SCALE
+from save_final_video import save_final_video
 
-DATANAME = "trump"
-TARGETNAME = "qimeidi"
+DATANAME = "trump2"
+TARGETNAME = "deep"
 
-SCALE = np.arange(0.5, 1.5, 0.1)  # 缩放范围
 
 def similarity(a: np.ndarray, b: np.ndarray) -> float:
     """
@@ -46,6 +47,8 @@ def match_token_to_data(
 
     best_score = -float('inf')
     best_idx = -1
+    print(f"🔍 Matching token of length {token_len} against data feature of length {data_len}...")
+    print(len(windows), "windows to match")
 
     for i in range(0, len(windows), batch_size):
         batch = windows[i:i+batch_size]
@@ -79,7 +82,7 @@ def match_all_tokens(target_name: str, data_name: str, output_dir: str = "../dat
     target_audio = ProcessedAudio(target_name)
     target_audio.load_audio(target_name)
     target_audio.pre_process()
-    #target_audio.audio = target_audio.audio[:10 * 16000]
+    #target_audio.audio = target_audio.audio[:5 * 16000]
     target_audio.audio = librosa.util.normalize(target_audio.audio)
     target_audio.tokenize()
     target_audio.extract_feature()
@@ -162,6 +165,14 @@ def match_all_tokens(target_name: str, data_name: str, output_dir: str = "../dat
         final_target_save_path = os.path.join(output_dir, f"_final_target_{target_name}.wav")
         sf.write(final_target_save_path, final_target, samplerate=sampling_rate)
         print(f"[SAVED] Final target audio saved to {final_target_save_path}")
+
+    # 保存最终视频
+    save_final_video(
+        target_audio=target_audio,
+        data_audio=data_audio,
+        matched=matched,
+        output_path="../data/results/final_result.mp4"
+    )
 
     return matched
 

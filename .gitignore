@@ -1,4 +1,5 @@
 data/feature/
 data/matched_wavs/
+data/raw_video
 audio/_pycache
 experiment/_pycache
