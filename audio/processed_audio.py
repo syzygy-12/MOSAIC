@@ -207,7 +207,7 @@ class ProcessedAudio:
                 raise ValueError(f"[ERROR] No valid audio segments found for {self.name} x{scale:.2f}")
             feature = np.concatenate(features, axis=0)
             self.vecSet.append(feature)
-            print(scale)
+            #print(scale)
             if np.abs(scale - 1.0) < 1e-6:
                 self.vec = feature
         np.save(vecset_path, np.array(self.vecSet, dtype=object))

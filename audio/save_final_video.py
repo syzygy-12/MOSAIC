@@ -43,6 +43,9 @@ def save_final_video(
         raw_duration = token_end_frame - token_start_frame
         raw_start = target_audio.frame_index[token_start_frame]
         raw_end = min(target_audio.frame_index[token_end_frame], raw_start + raw_duration - 1)
+        if raw_duration <= 2:
+            print(f"Warning: match {i} has duration <= 2 frames, skipping")
+            continue
 
         # 目标时间轴上的插入位置
         start_time = raw_start * 0.02
@@ -54,14 +57,22 @@ def save_final_video(
         scale_factor = float(scale)
         data_start_frame = match["start"]
         data_end_frame = match["end"]
-        print(data_start_frame, data_end_frame, len(data_audio.frame_index))
+        origin_data_start_frame = int(data_start_frame * scale_factor)
+        origin_data_end_frame = int(data_end_frame * scale_factor)
         
-        data_duration = data_end_frame - data_start_frame
-        data_start = data_audio.frame_index[data_start_frame]
-        data_end = min(data_audio.frame_index[data_end_frame], data_start + data_duration - 1)
+        origin_data_duration = origin_data_end_frame - origin_data_start_frame
         
-        data_start = int(data_start * frame_size * scale_factor)
-        data_end = int(data_end * frame_size * scale_factor)
+        if origin_data_end_frame >= len(data_audio.frame_index):
+            print("Warning: origin_data_end_frame out of range")
+            continue
+        
+        data_start = data_audio.frame_index[origin_data_start_frame]
+        data_end = min(data_audio.frame_index[origin_data_end_frame],
+                        data_start + origin_data_duration - 1)
+        #print(data_start, data_end, len(data_audio.frame_index))
+        
+        data_start = int(data_start * frame_size)
+        data_end = int(data_end * frame_size)
         snippet_audio = raw_data_audio[data_start:data_end]
         # 保存每个 snippet_audio 到本地
         snippet_dir = os.path.join(os.path.dirname(output_path), "snippets")
@@ -93,7 +104,7 @@ def save_final_video(
             # 上一个 token 的 scale（如果是第一个 token，就设为1.0）
             prev_scale = float(matched[i - 1]["scale"]) if i > 0 else 1.0
 
-            pad_source_duration = pad_duration / prev_scale
+            pad_source_duration = pad_duration * prev_scale
             pad_start = prev_video_end_time
             pad_end = pad_start + pad_source_duration
 
@@ -106,12 +117,30 @@ def save_final_video(
 
             # 放缩 pad_clip，以让它播放 pad_duration 秒
             pad_clip = pad_clip.fx(mp.vfx.speedx, factor=prev_scale)
+            print("Padding clip duration:", pad_duration, "seconds")
+            print(pad_clip.duration, "seconds after speedx")
 
             final_video_segments.append(pad_clip)
             total_video_duration += pad_duration
+            prev_video_end_time = pad_end
+
+        # if total_video_duration < start_time:
+        #     pad_duration = start_time - total_video_duration
+
+        #     # 创建黑屏填充段
+        #     black_clip = mp.ColorClip(size=(original_height, original_width), color=(0, 0, 0), duration=pad_duration)
+        #     black_clip = black_clip.set_fps(data_video_clip.fps)
+
+        #     final_video_segments.append(black_clip)
+        #     total_video_duration += pad_duration
 
         # 拉伸视频 clip
         video_clip = data_video_clip.subclip(clip_start, clip_end).fx(mp.vfx.speedx, factor=scale_factor)
+        # clip保存到本地
+        video_clip_filename = f"video_clip_{i:03d}_{match['token']}.mp4"
+        video_clip_path = os.path.join(snippet_dir, video_clip_filename)
+        video_clip.write_videofile(video_clip_path, codec='libx264', audio_codec='aac')
+
         final_video_segments.append(video_clip)
         total_video_duration += scaled_duration
         prev_video_end_time = clip_end  # 更新为当前 clip 的结束时间（data 视频中的原始时间）
@@ -124,7 +153,7 @@ def save_final_video(
     # 合并视频
     final_video = mp.concatenate_videoclips(final_video_segments, method="compose")
     # 设置视频分辨率为原始视频的分辨率，拉伸成原始视频横纵比
-    final_video = final_video.resize(newsize=(original_width, original_height))
+    final_video = final_video.resize(newsize=(original_height, original_width))
     print("height:", original_height, "width:", original_width)
     final_audio_clip = mp.AudioFileClip(audio_output_path)
     final_video = final_video.set_audio(final_audio_clip)

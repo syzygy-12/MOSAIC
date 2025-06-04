@@ -47,8 +47,8 @@ def match_token_to_data(
 
     best_score = -float('inf')
     best_idx = -1
-    print(f"🔍 Matching token of length {token_len} against data feature of length {data_len}...")
-    print(len(windows), "windows to match")
+    #print(f"🔍 Matching token of length {token_len} against data feature of length {data_len}...")
+    #print(len(windows), "windows to match")
 
     for i in range(0, len(windows), batch_size):
         batch = windows[i:i+batch_size]
