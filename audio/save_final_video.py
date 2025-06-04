@@ -98,6 +98,11 @@ def save_final_video(
         original_duration = clip_end - clip_start
         scaled_duration = original_duration / scale_factor
 
+        print(f"Processing match {i}: token={match['token']}, "
+              f"start_time={start_time:.2f}, end_time={end_time:.2f}, "
+              f"clip_start={clip_start:.2f}, clip_end={clip_end:.2f}, "
+              f"scale_factor={scale_factor:.2f}") 
+
         # 若 total_video_duration < start_time，则插入填充片段（来自原视频后续）
         if total_video_duration < start_time:
             pad_duration = start_time - total_video_duration
@@ -117,8 +122,8 @@ def save_final_video(
 
             # 放缩 pad_clip，以让它播放 pad_duration 秒
             pad_clip = pad_clip.fx(mp.vfx.speedx, factor=prev_scale)
-            print("Padding clip duration:", pad_duration, "seconds")
-            print(pad_clip.duration, "seconds after speedx")
+            #print("Padding clip duration:", pad_duration, "seconds")
+            #print(pad_clip.duration, "seconds after speedx")
 
             final_video_segments.append(pad_clip)
             total_video_duration += pad_duration

@@ -10,8 +10,8 @@ import torch
 from processed_audio import SCALE
 from save_final_video import save_final_video
 
-DATANAME = "output"
-TARGETNAME = "qimeidi"
+DATANAME = "peed"
+TARGETNAME = "deep"
 
 
 def similarity(a: np.ndarray, b: np.ndarray) -> float:

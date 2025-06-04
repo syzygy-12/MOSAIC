@@ -294,6 +294,11 @@ class ProcessedAudio:
                     "text": word["word"].strip()
                 })
 
+                
+        # ========== 3.5. 调整 end，使其对齐下一个 token 的 start ==========
+        for i in range(len(tokens) - 1):
+            tokens[i]["end"] = tokens[i + 1]["start"]
+
         # ========== 4. 保存并赋值 ==========
         with open(token_path, "w", encoding="utf-8") as f:
             json.dump(tokens, f, ensure_ascii=False, indent=2)
