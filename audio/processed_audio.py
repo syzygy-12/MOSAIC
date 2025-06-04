@@ -171,9 +171,16 @@ class ProcessedAudio:
         os.makedirs(feature_dir, exist_ok=True)
         vecset_path = os.path.join(feature_dir, f"{self.name}_vecset.npy")
         self.vecSet = []
-        if os.path.exists(vecset_path):
-            print(f"[INFO] VecSet already exists for {self.name}, loading from {vecset_path}")
-            self.vecSet = np.load(vecset_path, allow_pickle=True).tolist()
+        if os.path.exists(os.path.join(feature_dir, f"{self.name}_vecset_0.npy")):
+            print(f"[INFO] VecSet split files already exist for {self.name}, loading...")
+            self.vecSet = []
+            idx = 0
+            while True:
+                path = os.path.join(feature_dir, f"{self.name}_vecset_{idx}.npy")
+                if not os.path.exists(path):
+                    break
+                self.vecSet.append(np.load(path, allow_pickle=True))
+                idx += 1
             # 兼容单独保存vec
             for idx, scale in enumerate(SCALE):
                 if np.abs(scale - 1.0) < 1e-6:
@@ -210,8 +217,9 @@ class ProcessedAudio:
             #print(scale)
             if np.abs(scale - 1.0) < 1e-6:
                 self.vec = feature
-        np.save(vecset_path, np.array(self.vecSet, dtype=object))
-        print(f"[OK] VecSet saved to {vecset_path} (len={len(self.vecSet)})")
+        for idx, feature in enumerate(self.vecSet):
+            np.save(os.path.join(feature_dir, f"{self.name}_vecset_{idx}.npy"), feature)
+        print(f"[OK] VecSet saved to {feature_dir} (len={len(self.vecSet)})")
         return self
 
     def extract_feature_from_segment(self, start: int, end: int, model_name: str = "lengyue233/content-vec-best") -> np.ndarray:
